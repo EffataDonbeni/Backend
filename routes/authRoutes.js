@@ -3,6 +3,7 @@ const router = express.Router();
 const { check, validationResult } = require("express-validator");
 const authController = require("../controllers/authController");
 const auth = require("../middleware/authMiddleware");
+const { restrictTo } = require("../middleware/roleMiddleware");
 
 // @route   POST api/auth/register
 // @desc    Register a user
@@ -37,5 +38,10 @@ router.post(
 // @desc    Get logged in user
 // @access  Private
 router.get("/me", auth, authController.getMe);
+
+// @route   GET api/auth/users
+// @desc    Get all users
+// @access  Private (Admin only)
+router.get("/users", auth, restrictTo('admin'), authController.getAllUsers);
 
 module.exports = router;

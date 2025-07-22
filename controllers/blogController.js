@@ -1,168 +1,498 @@
-// const Blog = require("../models/Blog");
-// const Comment = require("../models/Comment");
-// const User = require("../models/User");
+// controllers/blogController.js
+const Blog = require("../models/Blog");
+const Comment = require("../models/Comment");
+const catchAsync = require("../middleware/catchAsync");
+const AppError = require("../middleware/errorHandler");
+const cloudinary = require("cloudinary").v2;
+const multer = require("multer");
+const sharp = require("sharp");
 
-// // Create blog (Admin only)
-// exports.createBlog = async (req, res) => {
-//   try {
-//     const { title, content, excerpt, category, image } = req.body;
+// Configure multer for image uploads
+const multerStorage = multer.memoryStorage();
 
-//     const blog = new Blog({
-//       title,
-//       content,
-//       excerpt,
-//       category,
-//       image,
-//       author: req.user.id,
-//     });
+const multerFilter = (req, file, cb) => {
+  if (file.mimetype.startsWith("image")) {
+    cb(null, true);
+  } else {
+    cb(new AppError("Not an image! Please upload only images.", 400), false);
+  }
+};
 
-//     await blog.save();
-//     res.status(201).json(blog);
-//   } catch (err) {
-//     console.error(err.message);
-//     res.status(500).send("Server Error");
-//   }
-// };
+const upload = multer({
+  storage: multerStorage,
+  fileFilter: multerFilter,
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
+});
 
-// // Get all blogs
-// exports.getBlogs = async (req, res) => {
-//   try {
-//     const blogs = await Blog.find().populate("author", "username");
-//     res.json(blogs);
-//   } catch (err) {
-//     console.error(err.message);
-//     res.status(500).send("Server Error");
-//   }
-// };
+exports.uploadBlogImages = upload.fields([
+  { name: "featuredImage", maxCount: 1 },
+  { name: "images", maxCount: 10 },
+]);
 
-// // Get single blog
-// exports.getBlogById = async (req, res) => {
-//   try {
-//     const blog = await Blog.findById(req.params.id)
-//       .populate("author", "username")
-//       .populate({
-//         path: "comments",
-//         populate: { path: "user", select: "username" },
-//       });
+// ADMIN BLOG CRUD OPERATIONS
 
-//     if (!blog) {
-//       return res.status(404).json({ msg: "Blog not found" });
-//     }
+// Get all blogs (Admin only)
+exports.getAllBlogs = catchAsync(async (req, res) => {
+  const page = parseInt(req.query.page) || 1;
+  const limit = parseInt(req.query.limit) || 10;
+  const skip = (page - 1) * limit;
 
-//     res.json(blog);
-//   } catch (err) {
-//     console.error(err.message);
-//     res.status(500).send("Server Error");
-//   }
-// };
+  const filter = {};
+  if (req.query.status) filter.status = req.query.status;
+  if (req.query.category) filter.category = req.query.category;
+  if (req.query.author) filter.author = req.query.author;
+  if (req.query.featured !== undefined)
+    filter.featured = req.query.featured === "true";
 
-// // Update blog (Admin only)
-// exports.updateBlog = async (req, res) => {
-//   try {
-//     const { title, content, excerpt, category, image } = req.body;
+  // Search functionality
+  if (req.query.search) {
+    filter.$text = { $search: req.query.search };
+  }
 
-//     const blog = await Blog.findByIdAndUpdate(
-//       req.params.id,
-//       { title, content, excerpt, category, image },
-//       { new: true }
-//     );
+  const sort = req.query.sort || "-createdAt";
 
-//     if (!blog) {
-//       return res.status(404).json({ msg: "Blog not found" });
-//     }
+  const blogs = await Blog.find(filter)
+    .populate("author", "name email avatar")
+    .sort(sort)
+    .skip(skip)
+    .limit(limit)
+    .lean();
 
-//     res.json(blog);
-//   } catch (err) {
-//     console.error(err.message);
-//     res.status(500).send("Server Error");
-//   }
-// };
+  const total = await Blog.countDocuments(filter);
 
-// // Delete blog (Admin only)
-// exports.deleteBlog = async (req, res) => {
-//   try {
-//     const blog = await Blog.findById(req.params.id);
+  res.status(200).json({
+    success: true,
+    data: {
+      blogs,
+      pagination: {
+        current: page,
+        pages: Math.ceil(total / limit),
+        total,
+        hasNext: page < Math.ceil(total / limit),
+        hasPrev: page > 1,
+      },
+    },
+  });
+});
 
-//     if (!blog) {
-//       return res.status(404).json({ msg: "Blog not found" });
-//     }
+// Get single blog (Admin)
+exports.getBlog = catchAsync(async (req, res) => {
+  const blog = await Blog.findById(req.params.id)
+    .populate("author", "name email avatar")
+    .populate({
+      path: "comments",
+      populate: {
+        path: "author",
+        select: "name avatar",
+      },
+    });
 
-//     // Delete associated comments
-//     await Comment.deleteMany({ blog: blog._id });
+  if (!blog) {
+    return res.status(404).json({
+      success: false,
+      message: "Blog not found",
+    });
+  }
 
-//     await blog.remove();
-//     res.json({ msg: "Blog removed" });
-//   } catch (err) {
-//     console.error(err.message);
-//     res.status(500).send("Server Error");
-//   }
-// };
+  res.status(200).json({
+    success: true,
+    data: { blog },
+  });
+});
 
-// // Like/unlike blog
-// exports.toggleLike = async (req, res) => {
-//   try {
-//     const blog = await Blog.findById(req.params.id);
+// Create blog (Admin only)
+exports.createBlog = catchAsync(async (req, res) => {
+  // Handle image uploads
+  if (req.files) {
+    if (req.files.featuredImage) {
+      const featuredImageBuffer = await sharp(req.files.featuredImage[0].buffer)
+        .resize(1200, 630)
+        .jpeg({ quality: 90 })
+        .toBuffer();
 
-//     if (!blog) {
-//       return res.status(404).json({ msg: "Blog not found" });
-//     }
+      const featuredImageResult = await cloudinary.uploader.upload(
+        `data:image/jpeg;base64,${featuredImageBuffer.toString("base64")}`,
+        {
+          folder: "blog/featured",
+          transformation: [{ width: 1200, height: 630, crop: "fill" }],
+        }
+      );
 
-//     const index = blog.likes.indexOf(req.user.id);
+      req.body.featuredImage = {
+        public_id: featuredImageResult.public_id,
+        secure_url: featuredImageResult.secure_url,
+        alt_text: req.body.featuredImageAlt || req.body.title,
+      };
+    }
 
-//     if (index === -1) {
-//       blog.likes.push(req.user.id);
-//     } else {
-//       blog.likes.splice(index, 1);
-//     }
+    if (req.files.images) {
+      const imagePromises = req.files.images.map(async (file) => {
+        const imageBuffer = await sharp(file.buffer)
+          .resize(800, 600)
+          .jpeg({ quality: 85 })
+          .toBuffer();
 
-//     await blog.save();
-//     res.json(blog.likes);
-//   } catch (err) {
-//     console.error(err.message);
-//     res.status(500).send("Server Error");
-//   }
-// };
+        const result = await cloudinary.uploader.upload(
+          `data:image/jpeg;base64,${imageBuffer.toString("base64")}`,
+          {
+            folder: "blog/content",
+            transformation: [{ width: 800, height: 600, crop: "fill" }],
+          }
+        );
 
-// // Add comment
-// exports.addComment = async (req, res) => {
-//   try {
-//     const { content } = req.body;
+        return {
+          public_id: result.public_id,
+          secure_url: result.secure_url,
+          alt_text: file.originalname,
+        };
+      });
 
-//     const comment = new Comment({
-//       content,
-//       blog: req.params.id,
-//       user: req.user.id,
-//     });
+      req.body.images = await Promise.all(imagePromises);
+    }
+  }
 
-//     await comment.save();
+  // Set author to current user
+  req.body.author = req.user.id;
 
-//     const blog = await Blog.findById(req.params.id);
-//     blog.comments.push(comment._id);
-//     await blog.save();
+  // Process tags
+  if (req.body.tags && typeof req.body.tags === "string") {
+    req.body.tags = req.body.tags
+      .split(",")
+      .map((tag) => tag.trim().toLowerCase());
+  }
 
-//     res.status(201).json(comment);
-//   } catch (err) {
-//     console.error(err.message);
-//     res.status(500).send("Server Error");
-//   }
-// };
+  const blog = await Blog.create(req.body);
 
-// // Toggle favorite
-// exports.toggleFavorite = async (req, res) => {
-//   try {
-//     const user = await User.findById(req.user.id);
-//     const index = user.favorites.indexOf(req.params.id);
+  await blog.populate("author", "name email avatar");
 
-//     if (index === -1) {
-//       user.favorites.push(req.params.id);
-//     } else {
-//       user.favorites.splice(index, 1);
-//     }
+  res.status(201).json({
+    success: true,
+    message: "Blog created successfully",
+    data: { blog },
+  });
+});
 
-//     await user.save();
-//     res.json(user.favorites);
-//   } catch (err) {
-//     console.error(err.message);
-//     res.status(500).send("Server Error");
-//   }
-// };
+// Update blog (Admin only)
+exports.updateBlog = catchAsync(async (req, res) => {
+  let blog = await Blog.findById(req.params.id);
+
+  if (!blog) {
+    return res.status(404).json({
+      success: false,
+      message: "Blog not found",
+    });
+  }
+
+  // Handle image uploads
+  if (req.files) {
+    if (req.files.featuredImage) {
+      // Delete old featured image
+      if (blog.featuredImage?.public_id) {
+        await cloudinary.uploader.destroy(blog.featuredImage.public_id);
+      }
+
+      const featuredImageBuffer = await sharp(req.files.featuredImage[0].buffer)
+        .resize(1200, 630)
+        .jpeg({ quality: 90 })
+        .toBuffer();
+
+      const featuredImageResult = await cloudinary.uploader.upload(
+        `data:image/jpeg;base64,${featuredImageBuffer.toString("base64")}`,
+        {
+          folder: "blog/featured",
+          transformation: [{ width: 1200, height: 630, crop: "fill" }],
+        }
+      );
+
+      req.body.featuredImage = {
+        public_id: featuredImageResult.public_id,
+        secure_url: featuredImageResult.secure_url,
+        alt_text: req.body.featuredImageAlt || req.body.title || blog.title,
+      };
+    }
+
+    if (req.files.images) {
+      // Delete old images
+      if (blog.images?.length > 0) {
+        const deletePromises = blog.images.map((img) =>
+          cloudinary.uploader.destroy(img.public_id)
+        );
+        await Promise.all(deletePromises);
+      }
+
+      const imagePromises = req.files.images.map(async (file) => {
+        const imageBuffer = await sharp(file.buffer)
+          .resize(800, 600)
+          .jpeg({ quality: 85 })
+          .toBuffer();
+
+        const result = await cloudinary.uploader.upload(
+          `data:image/jpeg;base64,${imageBuffer.toString("base64")}`,
+          {
+            folder: "blog/content",
+            transformation: [{ width: 800, height: 600, crop: "fill" }],
+          }
+        );
+
+        return {
+          public_id: result.public_id,
+          secure_url: result.secure_url,
+          alt_text: file.originalname,
+        };
+      });
+
+      req.body.images = await Promise.all(imagePromises);
+    }
+  }
+
+  // Process tags
+  if (req.body.tags && typeof req.body.tags === "string") {
+    req.body.tags = req.body.tags
+      .split(",")
+      .map((tag) => tag.trim().toLowerCase());
+  }
+
+  blog = await Blog.findByIdAndUpdate(req.params.id, req.body, {
+    new: true,
+    runValidators: true,
+  }).populate("author", "name email avatar");
+
+  res.status(200).json({
+    success: true,
+    message: "Blog updated successfully",
+    data: { blog },
+  });
+});
+
+// Delete blog (Admin only)
+exports.deleteBlog = catchAsync(async (req, res) => {
+  const blog = await Blog.findById(req.params.id);
+
+  if (!blog) {
+    return res.status(404).json({
+      success: false,
+      message: "Blog not found",
+    });
+  }
+
+  // Delete images from cloudinary
+  const deletePromises = [];
+
+  if (blog.featuredImage?.public_id) {
+    deletePromises.push(
+      cloudinary.uploader.destroy(blog.featuredImage.public_id)
+    );
+  }
+
+  if (blog.images?.length > 0) {
+    blog.images.forEach((img) => {
+      deletePromises.push(cloudinary.uploader.destroy(img.public_id));
+    });
+  }
+
+  await Promise.all(deletePromises);
+
+  // Delete associated comments
+  await Comment.deleteMany({ blog: req.params.id });
+
+  // Delete the blog
+  await Blog.findByIdAndDelete(req.params.id);
+
+  res.status(200).json({
+    success: true,
+    message: "Blog deleted successfully",
+  });
+});
+
+// PUBLIC BLOG OPERATIONS
+
+// Get published blogs (Public)
+exports.getPublishedBlogs = catchAsync(async (req, res) => {
+  const page = parseInt(req.query.page) || 1;
+  const limit = parseInt(req.query.limit) || 9;
+  const skip = (page - 1) * limit;
+
+  const filter = { status: "published" };
+
+  if (req.query.category) filter.category = req.query.category;
+  if (req.query.featured !== undefined)
+    filter.featured = req.query.featured === "true";
+  if (req.query.tags) {
+    const tags = req.query.tags
+      .split(",")
+      .map((tag) => tag.trim().toLowerCase());
+    filter.tags = { $in: tags };
+  }
+
+  // Search functionality
+  if (req.query.search) {
+    filter.$or = [
+      { title: { $regex: req.query.search, $options: "i" } },
+      { excerpt: { $regex: req.query.search, $options: "i" } },
+      { content: { $regex: req.query.search, $options: "i" } },
+    ];
+  }
+
+  const sort = req.query.sort === "oldest" ? "publishedAt" : "-publishedAt";
+
+  const blogs = await Blog.find(filter)
+    .populate("author", "name avatar")
+    .select("-content") // Exclude full content for list view
+    .sort(sort)
+    .skip(skip)
+    .limit(limit)
+    .lean();
+
+  // Add user-specific data if user is logged in
+  if (req.user) {
+    blogs.forEach((blog) => {
+      blog.isLiked = blog.likes?.some(
+        (like) => like.user.toString() === req.user.id
+      );
+      blog.isBookmarked = blog.bookmarks?.some(
+        (bookmark) => bookmark.user.toString() === req.user.id
+      );
+    });
+  }
+
+  const total = await Blog.countDocuments(filter);
+
+  res.status(200).json({
+    success: true,
+    data: {
+      blogs,
+      pagination: {
+        current: page,
+        pages: Math.ceil(total / limit),
+        total,
+        hasNext: page < Math.ceil(total / limit),
+        hasPrev: page > 1,
+      },
+    },
+  });
+});
+
+// Get single published blog by slug (Public)
+exports.getPublishedBlogBySlug = catchAsync(async (req, res) => {
+  const blog = await Blog.findOne({
+    slug: req.params.slug,
+    status: "published",
+  })
+    .populate("author", "name avatar bio")
+    .lean();
+
+  if (!blog) {
+    return res.status(404).json({
+      success: false,
+      message: "Blog not found",
+    });
+  }
+
+  // Increment views
+  await Blog.findByIdAndUpdate(blog._id, { $inc: { views: 1 } });
+  blog.views += 1;
+
+  // Add user-specific data if user is logged in
+  if (req.user) {
+    blog.isLiked = blog.likes?.some(
+      (like) => like.user.toString() === req.user.id
+    );
+    blog.isBookmarked = blog.bookmarks?.some(
+      (bookmark) => bookmark.user.toString() === req.user.id
+    );
+  }
+
+  // Get related blogs
+  const relatedBlogs = await Blog.find({
+    _id: { $ne: blog._id },
+    category: blog.category,
+    status: "published",
+  })
+    .populate("author", "name avatar")
+    .select("-content")
+    .sort("-publishedAt")
+    .limit(3)
+    .lean();
+
+  res.status(200).json({
+    success: true,
+    data: {
+      blog,
+      relatedBlogs,
+    },
+  });
+});
+
+// Get blog categories with counts (Public)
+exports.getBlogCategories = catchAsync(async (req, res) => {
+  const categories = await Blog.aggregate([
+    { $match: { status: "published" } },
+    { $group: { _id: "$category", count: { $sum: 1 } } },
+    { $sort: { count: -1 } },
+  ]);
+
+  res.status(200).json({
+    success: true,
+    data: { categories },
+  });
+});
+
+// Get featured blogs (Public)
+exports.getFeaturedBlogs = catchAsync(async (req, res) => {
+  const limit = parseInt(req.query.limit) || 5;
+
+  const blogs = await Blog.find({ status: "published", featured: true })
+    .populate("author", "name avatar")
+    .select("-content")
+    .sort("-publishedAt")
+    .limit(limit)
+    .lean();
+
+  res.status(200).json({
+    success: true,
+    data: { blogs },
+  });
+});
+
+// Get blog stats (Admin only)
+exports.getBlogStats = catchAsync(async (req, res) => {
+  const stats = await Blog.aggregate([
+    {
+      $group: {
+        _id: "$status",
+        count: { $sum: 1 },
+        totalViews: { $sum: "$views" },
+        totalLikes: { $sum: "$likesCount" },
+        totalComments: { $sum: "$commentsCount" },
+      },
+    },
+  ]);
+
+  const categoryStats = await Blog.aggregate([
+    { $match: { status: "published" } },
+    {
+      $group: {
+        _id: "$category",
+        count: { $sum: 1 },
+        avgViews: { $avg: "$views" },
+      },
+    },
+  ]);
+
+  const totalBlogs = await Blog.countDocuments();
+  const publishedBlogs = await Blog.countDocuments({ status: "published" });
+  const draftBlogs = await Blog.countDocuments({ status: "draft" });
+
+  res.status(200).json({
+    success: true,
+    data: {
+      overview: {
+        totalBlogs,
+        publishedBlogs,
+        draftBlogs,
+      },
+      statusStats: stats,
+      categoryStats,
+    },
+  });
+});

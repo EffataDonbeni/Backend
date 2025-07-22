@@ -24,7 +24,7 @@ module.exports = async function (req, res, next) {
     }
 
     if (!user.isActive) {
-      return res.status(401).json({ msg: "Account is deactivated" });
+      return res.status(401).json({ msg: "Account is desactivated" });
     }
 
     req.user = user; // Now includes role
