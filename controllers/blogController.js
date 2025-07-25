@@ -6,6 +6,7 @@ const AppError = require("../middleware/errorHandler");
 const cloudinary = require("cloudinary").v2;
 const multer = require("multer");
 const sharp = require("sharp");
+const { validationResult } = require("express-validator");
 
 // Configure multer for image uploads
 const multerStorage = multer.memoryStorage();
@@ -21,7 +22,7 @@ const multerFilter = (req, file, cb) => {
 const upload = multer({
   storage: multerStorage,
   fileFilter: multerFilter,
-  limits: { fileSize: 5 * 1024 * 1024 }, // 
+  limits: { fileSize: 5 * 1024 * 1024 }, //
 });
 
 exports.uploadBlogImages = upload.fields([
@@ -102,6 +103,10 @@ exports.getBlog = catchAsync(async (req, res) => {
 
 // Create blog (Admin only)
 exports.createBlog = catchAsync(async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ errors: errors.array() });
+  }
   // Handle image uploads
   if (req.files) {
     if (req.files.featuredImage) {
@@ -174,6 +179,10 @@ exports.createBlog = catchAsync(async (req, res) => {
 
 // Update blog (Admin only)
 exports.updateBlog = catchAsync(async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ errors: errors.array() });
+  }
   let blog = await Blog.findById(req.params.id);
 
   if (!blog) {
@@ -495,4 +504,187 @@ exports.getBlogStats = catchAsync(async (req, res) => {
       categoryStats,
     },
   });
+});
+
+// Like or Unlike a blog
+exports.toggleLike = catchAsync(async (req, res) => {
+  const blog = await Blog.findById(req.params.id);
+  if (!blog)
+    return res.status(404).json({ success: false, message: "Blog not found" });
+
+  const userId = req.user.id;
+  const liked = blog.likes.some((like) => like.user.toString() === userId);
+
+  if (liked) {
+    // Unlike
+    blog.likes = blog.likes.filter((like) => like.user.toString() !== userId);
+    blog.likesCount = Math.max(0, blog.likesCount - 1);
+  } else {
+    // Like
+    blog.likes.push({ user: userId });
+    blog.likesCount += 1;
+  }
+  await blog.save();
+  res
+    .status(200)
+    .json({ success: true, liked: !liked, likesCount: blog.likesCount });
+});
+
+// Bookmark or Unbookmark a blog
+exports.toggleBookmark = catchAsync(async (req, res) => {
+  const blog = await Blog.findById(req.params.id);
+  if (!blog)
+    return res.status(404).json({ success: false, message: "Blog not found" });
+
+  const userId = req.user.id;
+  const bookmarked = blog.bookmarks.some((bm) => bm.user.toString() === userId);
+
+  if (bookmarked) {
+    // Unbookmark
+    blog.bookmarks = blog.bookmarks.filter(
+      (bm) => bm.user.toString() !== userId
+    );
+    blog.bookmarksCount = Math.max(0, blog.bookmarksCount - 1);
+  } else {
+    // Bookmark
+    blog.bookmarks.push({ user: userId });
+    blog.bookmarksCount += 1;
+  }
+  await blog.save();
+  res.status(200).json({
+    success: true,
+    bookmarked: !bookmarked,
+    bookmarksCount: blog.bookmarksCount,
+  });
+});
+
+// Add a comment to a blog
+exports.addComment = catchAsync(async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ errors: errors.array() });
+  }
+  const { content } = req.body;
+  if (!content || content.length < 1 || content.length > 1000) {
+    return res.status(400).json({
+      success: false,
+      message: "Comment content is required and must be 1-1000 characters.",
+    });
+  }
+  const blog = await Blog.findById(req.params.id);
+  if (!blog)
+    return res.status(404).json({ success: false, message: "Blog not found" });
+
+  const comment = await Comment.create({
+    content,
+    author: req.user.id,
+    blog: blog._id,
+    parentComment: req.body.parentComment || null,
+  });
+  blog.comments.push(comment._id);
+  blog.commentsCount += 1;
+  await blog.save();
+  await comment.populate("author", "username email");
+  res.status(201).json({ success: true, comment });
+});
+
+// Delete a comment from a blog
+exports.deleteComment = catchAsync(async (req, res) => {
+  const blog = await Blog.findById(req.params.id);
+  if (!blog)
+    return res.status(404).json({ success: false, message: "Blog not found" });
+  const comment = await Comment.findById(req.params.comment_id);
+  if (!comment)
+    return res
+      .status(404)
+      .json({ success: false, message: "Comment not found" });
+
+  // Only comment owner or admin can delete
+  if (comment.author.toString() !== req.user.id && req.user.role !== "admin") {
+    return res.status(403).json({
+      success: false,
+      message: "Not authorized to delete this comment",
+    });
+  }
+  await comment.remove();
+  // Remove from blog.comments array
+  blog.comments = blog.comments.filter(
+    (cid) => cid.toString() !== comment._id.toString()
+  );
+  blog.commentsCount = Math.max(0, blog.commentsCount - 1);
+  await blog.save();
+  res.status(200).json({ success: true, message: "Comment deleted" });
+});
+
+// Flag a comment as inappropriate (user)
+exports.flagComment = catchAsync(async (req, res) => {
+  const { reason } = req.body;
+  const validReasons = ["spam", "inappropriate", "harassment", "other"];
+  if (!reason || !validReasons.includes(reason)) {
+    return res
+      .status(400)
+      .json({ success: false, message: "Invalid flag reason." });
+  }
+  const comment = await Comment.findById(req.params.comment_id);
+  if (!comment)
+    return res
+      .status(404)
+      .json({ success: false, message: "Comment not found" });
+  // Prevent duplicate flag by same user
+  if (comment.flaggedBy.some((f) => f.user.toString() === req.user.id)) {
+    return res.status(400).json({
+      success: false,
+      message: "You have already flagged this comment.",
+    });
+  }
+  comment.flaggedBy.push({ user: req.user.id, reason });
+  comment.status = "flagged";
+  await comment.save();
+  res
+    .status(200)
+    .json({ success: true, message: "Comment flagged for review." });
+});
+
+// Moderate a flagged comment (admin)
+exports.moderateComment = catchAsync(async (req, res) => {
+  if (req.user.role !== "admin") {
+    return res
+      .status(403)
+      .json({ success: false, message: "Admin privileges required." });
+  }
+  const { status } = req.body; // 'active', 'hidden', 'flagged'
+  const validStatuses = ["active", "hidden", "flagged"];
+  if (!status || !validStatuses.includes(status)) {
+    return res.status(400).json({ success: false, message: "Invalid status." });
+  }
+  const comment = await Comment.findById(req.params.comment_id);
+  if (!comment)
+    return res
+      .status(404)
+      .json({ success: false, message: "Comment not found" });
+  comment.status = status;
+  // Optionally clear flags if activating or hiding
+  if (status !== "flagged") comment.flaggedBy = [];
+  await comment.save();
+  res
+    .status(200)
+    .json({ success: true, message: `Comment status set to ${status}.` });
+});
+
+// Get all comments for admin moderation
+exports.getAllCommentsForAdmin = catchAsync(async (req, res) => {
+  if (req.user.role !== "admin") {
+    return res
+      .status(403)
+      .json({ success: false, message: "Admin privileges required." });
+  }
+  const comments = await Comment.find()
+    .populate("author", "username email")
+    .populate("blog", "title")
+    .lean();
+  const formatted = comments.map((c) => ({
+    ...c,
+    blogTitle: c.blog && c.blog.title ? c.blog.title : "",
+  }));
+  res.status(200).json({ success: true, data: { comments: formatted } });
 });
