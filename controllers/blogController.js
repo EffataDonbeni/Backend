@@ -1,6 +1,6 @@
 // controllers/blogController.js
 const Blog = require("../models/Blog");
-const Comment = require("../models/Comment");
+const Comment = require("../models/comment");
 const catchAsync = require("../middleware/catchAsync");
 const AppError = require("../middleware/errorHandler");
 const cloudinary = require("cloudinary").v2;
@@ -21,7 +21,7 @@ const multerFilter = (req, file, cb) => {
 const upload = multer({
   storage: multerStorage,
   fileFilter: multerFilter,
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
+  limits: { fileSize: 5 * 1024 * 1024 }, // 
 });
 
 exports.uploadBlogImages = upload.fields([
@@ -29,7 +29,7 @@ exports.uploadBlogImages = upload.fields([
   { name: "images", maxCount: 10 },
 ]);
 
-// ADMIN BLOG CRUD OPERATIONS
+// BLOG CRUD OPERATIONS
 
 // Get all blogs (Admin only)
 exports.getAllBlogs = catchAsync(async (req, res) => {
